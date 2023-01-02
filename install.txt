@@ -1,0 +1,7 @@
+pip install gym==0.21.0 gym[atari]==0.21.0 opencv-python==4.6.0.66
+pip install importlib-metadata==4.13.0
+pip install gym-retro==0.8.0
+pip install scikit-image==0.19.3
+pip install matplotlib==3.5.3
+pip install pytables==3.7.0
+conda install pytorch torchvision torchaudio cpuonly -c pytorch # ADD CUDA IF YOU HAVE
