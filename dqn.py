@@ -2,8 +2,6 @@
 # LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libstdc++.so.6 python dqn.py
 
 # TODO:
-# - fix replay memory getting out of memory (maybe use PyTables)
-# - also save replay memory in checkpoints
 # - try different discount factors (gamma)
 
 import numpy as np
@@ -21,6 +19,9 @@ import random
 import os
 import csv
 import tables
+
+REPLAY_MEMORY_FILE = "replay_memory.hdf5"
+REPLAY_MEMORY_TABLE_NAME = "replay_memory_table"
 
 
 class Net(nn.Module):
@@ -98,84 +99,50 @@ class RemoveDimensionsOfSize1Wrapper(gym.ObservationWrapper):
         return observation.squeeze()
 
 
-# class ReplayMemory:
-#     """Store multiple (prev_obs, action, reward, obs, done) in separate numpy arrays."""
-
-#     def __init__(self, max_len):
-#         self.initialized = False
-#         self.max_len = max_len
-#         self.n_items = 0
-#         self.curr_index = 0  # circular array - if max_len is reached, overwrite index 0
-
-#         self.prev_obs_arr = np.zeros(1)  # placeholder
-#         self.obs_arr = np.zeros(1)  # placeholder
-#         self.action_arr = np.zeros(max_len, dtype=np.int8)
-#         self.reward_arr = np.zeros(max_len, dtype=np.float32)
-#         self.done_arr = np.zeros(max_len, dtype=np.int8)
-
-#     def add(
-#         self,
-#         prev_obs: np.ndarray,
-#         action: int,
-#         reward: float,
-#         obs: np.ndarray,
-#         done: bool,
-#     ):
-#         if not self.initialized:
-#             self.obs_arr = np.zeros((self.max_len, *obs.shape), dtype=prev_obs.dtype)
-#             self.prev_obs_arr = np.zeros(
-#                 (self.max_len, *prev_obs.shape), dtype=obs.dtype
-#             )
-#             self.initialized = True
-#         self.prev_obs_arr[self.curr_index, :, :, :] = prev_obs
-#         self.action_arr[self.curr_index] = action
-#         self.reward_arr[self.curr_index] = reward
-#         self.obs_arr[self.curr_index, :, :, :] = obs
-#         self.done_arr[self.curr_index] = 1 if done else 0
-
-#         self.curr_index += 1
-#         self.curr_index %= self.max_len
-#         if self.n_items < self.max_len:
-#             self.n_items += 1
-
-#     def get_minibatch(self, indices: list):
-#         return [
-#             np.take(arr, indices, axis=0)
-#             for arr in [
-#                 self.prev_obs_arr,
-#                 self.action_arr,
-#                 self.reward_arr,
-#                 self.obs_arr,
-#                 self.done_arr,
-#             ]
-#         ]
-
-#     def __len__(self):
-#         return self.n_items
-
-
 class ReplayMemoryRowDescription(tables.IsDescription):
-    prev_obs = tables.UInt8Col(shape=(4, 84, 84))
-    action = tables.UInt8Col()
-    reward = tables.Float32Col()
-    obs = tables.UInt8Col(shape=(4, 84, 84))
-    done = tables.BoolCol()
+    # pos is needed so that modify_rows works
+    prev_obs = tables.UInt8Col(shape=(4, 84, 84), pos=1)
+    action = tables.UInt8Col(pos=2)
+    reward = tables.Float32Col(pos=3)
+    obs = tables.UInt8Col(shape=(4, 84, 84), pos=4)
+    done = tables.BoolCol(pos=5)
 
 
 class ReplayMemory:
     """Store multiple (prev_obs, action, reward, obs, done) in separate numpy arrays."""
 
-    def __init__(self, max_len):
+    def __init__(self, max_len, checkpoint_filename: str = None):
         self.initialized = False
         self.max_len = max_len
-        self.n_items = 0
-        self.curr_index = 0  # circular array - if max_len is reached, overwrite index 0
-        self.h5file = tables.open_file(
-            "replay_memory.hdf5", mode="a", title="replay_memory"
-        )
-        self.h5file.create_table(
-            self.h5file.root, "replay_memory_table", ReplayMemoryRowDescription
-        )
+        self.open_file(checkpoint_filename)
+
+    def open_file(self, checkpoint_filename: str = None):
+        if checkpoint_filename:
+            tables.copy_file(checkpoint_filename, REPLAY_MEMORY_FILE, overwrite=True)
+            self.h5file = tables.open_file(REPLAY_MEMORY_FILE, mode="a")
+            self.table = self.h5file.get_node(
+                self.h5file.root, REPLAY_MEMORY_TABLE_NAME
+            )
+            self.n_items = self.table.nrows
+            with open(f"{checkpoint_filename}_index.txt", "r") as f:
+                self.curr_index = int(f.read())
+        else:
+            self.h5file = tables.open_file(
+                REPLAY_MEMORY_FILE, mode="w", title="replay_memory"
+            )
+            self.table = self.h5file.create_table(
+                self.h5file.root,
+                REPLAY_MEMORY_TABLE_NAME,
+                ReplayMemoryRowDescription,
+                expectedrows=self.max_len,
+            )
+            self.n_items = 0
+            self.curr_index = (
+                0  # circular array - if max_len is reached, overwrite index 0
+            )
+
+    def close(self):
+        self.h5file.close()
 
     def add(
         self,
@@ -185,17 +152,43 @@ class ReplayMemory:
         obs: np.ndarray,
         done: bool,
     ):
-        print(prev_obs.dtype, action, reward, obs.shape, done)
-        pass
+        if self.n_items < self.max_len:
+            entry = self.table.row
+            entry["prev_obs"] = prev_obs
+            entry["action"] = action
+            entry["reward"] = reward
+            entry["obs"] = obs
+            entry["done"] = done
+            entry.append()
+            self.n_items += 1
+            self.table.flush()
+        else:
+            self.table.modify_rows(
+                start=self.curr_index,
+                stop=self.curr_index + 1,
+                rows=[(prev_obs, action, reward, obs, done)],
+            )
+            self.table.flush()
+
+        # Restart from 0 if got at the end
+        self.curr_index += 1
+        if self.curr_index >= self.max_len:
+            self.curr_index = 0
 
     def get_minibatch(self, indices: list):
-        return None
+        return self.table.read_coordinates(indices)
+
+    def save(self, filename):
+        self.h5file.copy_file(dstfilename=filename)
+        with open(f"{filename}_index.txt", "w") as f:
+            f.write(str(self.curr_index))
 
     def __len__(self):
         return self.n_items
 
 
 def replay_memory_test():
+    # TODO: test checkpoints
     print("Testing replay memory")
     r = ReplayMemory(max_len=4)
     prev_obs = np.zeros((4, 84, 84), dtype=np.float32)
@@ -204,26 +197,26 @@ def replay_memory_test():
     r.add(prev_obs + 1, 1, 1.0, obs + 1, False)
     r.add(prev_obs + 2, 2, 2.0, obs + 2, True)
     mb = r.get_minibatch([0, 2])
-    assert mb[0][0][0, 0, 0] == 0
-    assert mb[1][0] == 0
-    assert mb[2][0] == 0
-    assert mb[3][0][0, 0, 0] == 0
-    assert mb[4][0] == False
-    assert mb[0][1][0, 0, 0] == 2
-    assert mb[1][1] == 2
-    assert mb[2][1] == 2
-    assert mb[3][1][0, 0, 0] == 2
-    assert mb[4][1] == True
+    assert mb[0]["prev_obs"][0, 0, 0] == 0
+    assert mb[0]["action"] == 0
+    assert mb[0]["reward"] == 0
+    assert mb[0]["obs"][0, 0, 0] == 0
+    assert mb[0]["done"] == False
+    assert mb[1]["prev_obs"][0, 0, 0] == 2
+    assert mb[1]["action"] == 2
+    assert mb[1]["reward"] == 2
+    assert mb[1]["obs"][0, 0, 0] == 2
+    assert mb[1]["done"] == True
 
     # Fill completely and overflow
     r.add(prev_obs + 3, 3, 3.0, obs + 3, True)
     r.add(prev_obs + 4, 4, 4.0, obs + 4, True)
-    mb = r.get_minibatch([0, 2])
-    assert mb[0][0][0, 0, 0] == 4
-    assert mb[1][0] == 4
-    assert mb[2][0] == 4
-    assert mb[3][0][0, 0, 0] == 4
-    assert mb[4][0] == True
+    r.add(prev_obs + 5, 5, 5.0, obs + 5, True)
+    mb = r.get_minibatch([0, 1, 2])
+    assert mb[0]["prev_obs"][0, 0, 0] == 4
+    assert mb[1]["prev_obs"][0, 0, 0] == 5
+    assert mb[2]["prev_obs"][0, 0, 0] == 2
+    r.close()
     print("Done testing replay memory")
 
 
@@ -231,13 +224,11 @@ criterion = torch.nn.MSELoss()
 gamma = 0.95  # TODO: choose a discount factor
 running_loss = 0
 
+from typing import Dict
+
 
 def gradient_descent_step(
-    prev_obs_minibatch: np.ndarray,
-    action_minibatch: np.ndarray,
-    rew_minibatch: np.ndarray,
-    obs_minibatch: np.ndarray,
-    done_minibatch: np.ndarray,
+    minibatch: Dict[str, np.ndarray],
     optimizer: torch.optim.Optimizer,
     prev_net: nn.Module,
     trained_net: nn.Module,
@@ -246,23 +237,25 @@ def gradient_descent_step(
     optimizer.zero_grad()
 
     # forward + backward + optimize
-    inp = torch.tensor(prev_obs_minibatch).double()
+    inp = torch.tensor(minibatch["prev_obs"]).double()
     outputs = trained_net(inp)
 
     # We only care about the predicted Q-values of actions we've chosen, select those
     actions_torch = torch.unsqueeze(
-        torch.tensor(action_minibatch, dtype=torch.int64), dim=1
+        torch.tensor(minibatch["action"], dtype=torch.int64), dim=1
     )
     outputs_for_actions = torch.gather(outputs, 1, actions_torch).squeeze()
 
     with torch.no_grad():
         # Target = reward + gamma * max_a prev_net(s')
-        rewards = torch.tensor(rew_minibatch)
-        prev_net_outputs = prev_net(torch.tensor(obs_minibatch).double())
+        rewards = torch.tensor(np.array(minibatch["reward"]))
+        prev_net_outputs = prev_net(torch.tensor(minibatch["obs"]).double())
         # select maximum
         state_values = prev_net_outputs.max(dim=1).values
         # ignore state values for terminal states
-        state_values = state_values * (1 - torch.tensor(done_minibatch))
+        state_values = state_values * (
+            1 - torch.tensor(np.array(minibatch["done"]).astype(int))
+        )
         # add them
         target_outputs = rewards + gamma * state_values
 
@@ -275,7 +268,7 @@ def gradient_descent_step(
 
 
 def main():
-    # replay_memory_test()
+    replay_memory_test()
     env = retro.make(game="BeamRider-Atari2600")
     env = RewardWrapper(env)
     env = FrameSkip(env)
@@ -307,7 +300,12 @@ def main():
         print("No checkpoint found, starting from beginning")
 
     prev_obs = env.reset()
-    replay_memory = ReplayMemory(max_len=1000000)
+    replay_memory_filename = None
+    if latest_epoch_savepoint >= 0:
+        replay_memory_filename = f"./replay_memory_epoch_{latest_epoch_savepoint}.hdf5"
+    replay_memory = ReplayMemory(
+        max_len=1000000, checkpoint_filename=replay_memory_filename
+    )
     minibatch_size = 32
     frame_index = 0
     with open("log.csv", "a") as file:
@@ -347,19 +345,9 @@ def main():
                     minibatch_indices = np.random.choice(
                         len(replay_memory), minibatch_size, replace=False
                     )
-                    (
-                        prev_obs_minibatch,
-                        action_minibatch,
-                        rew_minibatch,
-                        obs_minibatch,
-                        done_minibatch,
-                    ) = replay_memory.get_minibatch(minibatch_indices)
+                    minibatch = replay_memory.get_minibatch(minibatch_indices)
                     gradient_descent_step(
-                        prev_obs_minibatch,
-                        action_minibatch,
-                        rew_minibatch,
-                        obs_minibatch,
-                        done_minibatch,
+                        minibatch,
                         optimizer,
                         prev_net,
                         trained_net,
@@ -392,6 +380,7 @@ def main():
                 },
                 f"./network_epoch_{epoch}.pt",
             )
+            replay_memory.save(f"./replay_memory_epoch_{epoch}.hdf5")
     env.close()
 
 
