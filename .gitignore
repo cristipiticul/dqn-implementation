@@ -1,5 +1,5 @@
 network_epoch_*.pt
 replay_memory.hdf5
 replay_memory_epoch_*.hdf5
-replay_memory_epoch_*.hdf5_index.txt
+replay_memory_index_epoch_*.txt
 log.csv

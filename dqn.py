@@ -14,17 +14,19 @@ import torch.nn.functional as F
 from skimage import color
 from skimage.transform import resize
 from matplotlib import pyplot as plt
-from collections import deque
 import random
 import os
 import csv
 import tables
+from time import perf_counter
 
 from typing import Dict
 
 REPLAY_MEMORY_FILE = "replay_memory.hdf5"
 REPLAY_MEMORY_TABLE_NAME = "replay_memory_table"
-
+REPLAY_MEMORY_COMPRESSION_ENABLED = True
+REPLAY_MEMORY_COMPRESSION_LEVEL = 1  # Number between 1-9
+REPLAY_MEMORY_DELETE_OLD_CHECKPOINT = True
 
 criterion = torch.nn.MSELoss()
 gamma = 0.95  # TODO: choose a discount factor
@@ -146,11 +148,20 @@ class ReplayMemory:
             self.h5file = tables.open_file(
                 REPLAY_MEMORY_FILE, mode="w", title="replay_memory"
             )
+            filters = None
+            if REPLAY_MEMORY_COMPRESSION_ENABLED:
+                filters = tables.Filters(
+                    complevel=REPLAY_MEMORY_COMPRESSION_LEVEL,
+                    complib="blosc",
+                    fletcher32=True,
+                )
+
             self.table = self.h5file.create_table(
                 self.h5file.root,
                 REPLAY_MEMORY_TABLE_NAME,
                 ReplayMemoryRowDescription,
                 expectedrows=self.max_len,
+                filters=filters,
             )
             self.n_items = 0
             self.curr_index = (
@@ -387,6 +398,10 @@ def main():
     frame_index = 0
     with open("log.csv", "a") as file:
         writer = csv.writer(file)
+        writer.writerow(
+            ["epoch", "net_updates_count", "avg_loss", "time_per_update_sec"]
+        )
+        last_print_time = perf_counter()
         start_epoch = (last_checkpoint_epoch + 1) if last_checkpoint_epoch else 0
         for epoch in range(start_epoch, num_epochs):
             net_updates_count = 0
@@ -433,10 +448,21 @@ def main():
                     net_updates_count += 1
                     if net_updates_count % 200 == 199:  # print every 200 mini-batches
                         global running_loss
+                        new_print_time = perf_counter()
+                        time_per_update = (new_print_time - last_print_time) / 200
+                        last_print_time = new_print_time
                         print(
-                            f"[{epoch}, {net_updates_count + 1:5d}] loss: {running_loss / 200:.3f}"
+                            f"[{epoch}, {net_updates_count + 1:5d}] loss: {running_loss / 200:.3f}, time per update (s): {time_per_update}"
                         )
-                        writer.writerow([epoch, net_updates_count, running_loss])
+                        writer.writerow(
+                            [
+                                epoch,
+                                net_updates_count,
+                                running_loss / 200,
+                                time_per_update,
+                            ]
+                        )
+                        file.flush()
                         running_loss = 0.0
 
                 # if rew != 0.0:
@@ -462,6 +488,12 @@ def main():
                 replay_memory_checkpoint_filename(epoch),
                 replay_memory_index_checkpoint_filename(epoch),
             )
+            prev_replay_mem_checkpoint = replay_memory_checkpoint_filename(epoch - 1)
+            if REPLAY_MEMORY_DELETE_OLD_CHECKPOINT and os.path.exists(
+                prev_replay_mem_checkpoint
+            ):
+                os.remove(prev_replay_mem_checkpoint)
+                os.remove(replay_memory_index_checkpoint_filename(epoch - 1))
     env.close()
 
 
