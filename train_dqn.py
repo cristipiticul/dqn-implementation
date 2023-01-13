@@ -1,5 +1,5 @@
 # Run with
-# LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libstdc++.so.6 python src/dqn.py
+# LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libstdc++.so.6 python train_dqn.py
 
 # TODO:
 # - try different discount factors (gamma)
@@ -7,10 +7,6 @@
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from skimage import color
-from skimage.transform import resize
-from matplotlib import pyplot as plt
 import random
 import os
 import csv
@@ -19,6 +15,14 @@ from typing import Dict
 
 from src.environment import create_env
 from src.replay_memory import replay_memory_test, ReplayMemory
+from src.net import Net, get_action_epsilon_greedy
+from src.util import (
+    model_checkpoint_filename,
+    replay_memory_checkpoint_filename,
+    replay_memory_index_checkpoint_filename,
+    get_last_checkpoint,
+    load_checkpoint_model,
+)
 
 # More parameters in replay_memory.py
 REPLAY_MEMORY_DELETE_OLD_CHECKPOINT = True
@@ -28,23 +32,6 @@ gamma = 0.95  # TODO: choose a discount factor
 running_loss = 0
 num_epochs = 200
 replay_memory_size = 1000000
-
-
-class Net(nn.Module):
-    def __init__(self, num_actions):
-        super().__init__()
-        self.conv1 = nn.Conv2d(4, 16, 8, stride=4)
-        self.conv2 = nn.Conv2d(16, 32, 4, stride=2)
-        self.fc1 = nn.Linear(2592, 256)
-        self.fc2 = nn.Linear(256, num_actions)
-
-    def forward(self, x):
-        x = F.relu(self.conv1(x))
-        x = F.relu(self.conv2(x))
-        x = torch.flatten(x, 1)  # flatten all dimensions except batch
-        x = F.relu(self.fc1(x))
-        x = self.fc2(x)
-        return x
 
 
 def gradient_descent_step(
@@ -85,32 +72,6 @@ def gradient_descent_step(
 
     global running_loss
     running_loss += loss.item()
-
-
-def model_checkpoint_filename(epoch):
-    return f"network_epoch_{epoch}.pt"
-
-
-def replay_memory_checkpoint_filename(epoch):
-    return f"replay_memory_epoch_{epoch}.hdf5"
-
-
-def replay_memory_index_checkpoint_filename(epoch):
-    return f"replay_memory_index_epoch_{epoch}.txt"
-
-
-def get_last_checkpoint():
-    latest_epoch_savepoint = None
-    for epoch in range(num_epochs):
-        if os.path.exists(model_checkpoint_filename(epoch)):
-            latest_epoch_savepoint = epoch
-    return latest_epoch_savepoint
-
-
-def load_checkpoint_model(trained_net, optimizer, epoch):
-    checkpoint = torch.load(model_checkpoint_filename(epoch))
-    trained_net.load_state_dict(checkpoint["model_state_dict"])
-    optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
 
 
 def main():
@@ -161,17 +122,9 @@ def main():
                 else:
                     epsilon = 0.1
 
-                if (
-                    random.random() < epsilon
-                    or prev_obs is None
-                    or prev_obs.shape[0] < 4
-                ):
-                    action = random.randint(0, num_actions - 1)
-                else:
-                    inp = torch.tensor(prev_obs).double()
-                    inp = inp.unsqueeze(0)
-                    outp = trained_net(inp)  # TODO or prev_net?
-                    action = torch.argmax(outp).item()
+                action = get_action_epsilon_greedy(
+                    epsilon, prev_obs, trained_net, num_actions
+                )  # TODO trained_net or prev_net?
 
                 actions = np.zeros(num_actions, dtype=np.int8)
                 actions[action] = 1.0
@@ -241,15 +194,6 @@ def main():
                 os.remove(prev_replay_mem_checkpoint)
                 os.remove(replay_memory_index_checkpoint_filename(epoch - 1))
     env.close()
-
-
-def show_history(history):
-    fig, axs = plt.subplots(1, 4)
-    axs[0].imshow(history[0, :, :], cmap="gray")
-    axs[1].imshow(history[1, :, :], cmap="gray")
-    axs[2].imshow(history[2, :, :], cmap="gray")
-    axs[3].imshow(history[3, :, :], cmap="gray")
-    plt.show()
 
 
 if __name__ == "__main__":
