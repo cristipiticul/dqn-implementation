@@ -1,6 +1,6 @@
 import retro
 import gym
-import gym.envs.registration
+import numpy as np
 
 
 def create_env():
@@ -12,6 +12,8 @@ def create_env():
     env = gym.wrappers.ResizeObservation(env, 84)  # Rescale to 84x84
     env = RemoveDimensionsOfSize1Wrapper(env)
     env = gym.wrappers.FrameStack(env, 4)  # Keep history of 4 frames
+    # gym.wrappers.FrameStack returns LazyFrames -- convert to numpy
+    env = ConvertLazyFramesToNumpy(env)
     return env
 
 
@@ -71,3 +73,8 @@ class RemoveDimensionsOfSize1Wrapper(gym.ObservationWrapper):
             1 in observation.shape
         ), f"There is no dimension of size 1: {observation.shape}! This wrapper is useless"
         return observation.squeeze()
+
+
+class ConvertLazyFramesToNumpy(gym.ObservationWrapper):
+    def observation(self, observation):
+        return np.asarray(observation)

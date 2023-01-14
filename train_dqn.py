@@ -3,11 +3,11 @@
 
 # TODO:
 # - try different discount factors (gamma)
+# - try different learning rates
 
 import numpy as np
 import torch
 import torch.nn as nn
-import random
 import os
 import csv
 from time import perf_counter
@@ -28,7 +28,7 @@ from src.util import (
 REPLAY_MEMORY_DELETE_OLD_CHECKPOINT = True
 
 criterion = torch.nn.MSELoss()
-gamma = 0.95  # TODO: choose a discount factor
+gamma = 0.99  # TODO: choose a discount factor
 running_loss = 0
 num_epochs = 200
 replay_memory_size = 1000000
@@ -129,8 +129,6 @@ def main():
                 actions = np.zeros(num_actions, dtype=np.int8)
                 actions[action] = 1.0
                 obs, rew, done, _ = env.step(actions)
-                # gym.wrappers.FrameStack returns LazyFrames -- convert to numpy
-                obs = np.asarray(obs)
 
                 replay_memory.add(prev_obs, action, rew, obs, done)
                 if len(replay_memory) > minibatch_size:

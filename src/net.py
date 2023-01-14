@@ -33,6 +33,8 @@ def get_action_epsilon_greedy(
 
 
 def get_action(frames: np.ndarray, net: Net):
+    if type(frames) != np.ndarray:
+        print(type(frames))
     inp = torch.tensor(frames).double()
     inp = inp.unsqueeze(0)
     outp = net(inp)
