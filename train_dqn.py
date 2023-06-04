@@ -28,10 +28,13 @@ from src.util import (
 REPLAY_MEMORY_DELETE_OLD_CHECKPOINT = True
 
 criterion = torch.nn.MSELoss()
-gamma = 0.99  # TODO: choose a discount factor
+gamma = 0.95  # TODO: choose a discount factor
 running_loss = 0
 num_epochs = 200
 replay_memory_size = 1000000
+learning_rate = 0.03  # default is 0.01
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 def gradient_descent_step(
@@ -44,24 +47,26 @@ def gradient_descent_step(
     optimizer.zero_grad()
 
     # forward + backward + optimize
-    inp = torch.tensor(minibatch["prev_obs"]).double()
+    inp = torch.tensor(minibatch["prev_obs"], device=device).double()
     outputs = trained_net(inp)
 
     # We only care about the predicted Q-values of actions we've chosen, select those
     actions_torch = torch.unsqueeze(
-        torch.tensor(minibatch["action"], dtype=torch.int64), dim=1
+        torch.tensor(minibatch["action"], dtype=torch.int64, device=device), dim=1
     )
     outputs_for_actions = torch.gather(outputs, 1, actions_torch).squeeze()
 
     with torch.no_grad():
         # Target = reward + gamma * max_a prev_net(s')
-        rewards = torch.tensor(np.array(minibatch["reward"]))
-        prev_net_outputs = prev_net(torch.tensor(minibatch["obs"]).double())
+        rewards = torch.tensor(np.array(minibatch["reward"]), device=device)
+        prev_net_outputs = prev_net(
+            torch.tensor(minibatch["obs"], device=device).double()
+        )
         # select maximum
         state_values = prev_net_outputs.max(dim=1).values
         # ignore state values for terminal states
         state_values = state_values * (
-            1 - torch.tensor(np.array(minibatch["done"]).astype(int))
+            1 - torch.tensor(np.array(minibatch["done"]).astype(int), device=device)
         )
         # add them
         target_outputs = rewards + gamma * state_values
@@ -82,9 +87,9 @@ def main():
 
     # The parameters from the previous iteration are held fixed when optimising the loss function
     # ==> we need two sets of parameters
-    prev_net = Net(num_actions).double()
-    trained_net = Net(num_actions).double()
-    optimizer = torch.optim.RMSprop(trained_net.parameters())
+    prev_net = Net(num_actions).double().to(device)
+    trained_net = Net(num_actions).double().to(device)
+    optimizer = torch.optim.RMSprop(trained_net.parameters(), lr=learning_rate)
 
     # Find latest savepoint:
     last_checkpoint_epoch = get_last_checkpoint()
